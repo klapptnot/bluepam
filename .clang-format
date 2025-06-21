@@ -1,0 +1,70 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 96
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBraces: Attach
+NamespaceIndentation: All
+PointerAlignment: Left
+SortIncludes: true
+SpaceAfterTemplateKeyword: false
+SpaceBeforeParens: Always
+# SpaceBeforeParensOptions:
+#   AfterControlStatements: true
+#   AfterForeachMacros: true
+#   AfterFunctionDeclarationName: true
+#   AfterFunctionDefinitionName: true
+#   AfterIfMacros: true
+#   AfterOverloadedOperator: true
+#   AfterPlacementOperator: true
+#   AfterRequiresInClause: true
+#   AfterRequiresInExpression: true
+#   BeforeNonEmptyParentheses: true
+
+AlignEscapedNewlines: Left
+
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+
+AlignConsecutiveBitFields:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+  PadOperators: true
+
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+  AlignFunctionPointers: false
+  PadOperators: true
+
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossEmptyLines: true
+  AcrossComments: true
+  AlignCaseArrows: true
+  AlignCaseColons: false
+
+AlignOperands: AlignAfterOperator
+AlignAfterOpenBracket: BlockIndent
+# Why Google style has this set to true?
+# I don't want to read that style guide,
+# neither the clang-format documentation
+AllowShortEnumsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+
+BinPackArguments: true
+BinPackParameters: false
+BreakAfterAttributes: Never
+BreakStringLiterals: true
+
+# IndentPPDirectives: BeforeHash
+IndentGotoLabels: true
+InsertNewlineAtEOF: true
+
+TabWidth: 2
+UseTab: Never
