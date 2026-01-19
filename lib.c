@@ -11,28 +11,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/syslog.h>
 #include <syslog.h>
 #include <unistd.h>
 
 #define CONFIG_FILE                  "/etc/pam_bluetooth.conf"
-#define SYSCALL_MAX_BYTES_READ       1024
+#define SYSCALL_MAX_BYTES_READ       (1 << 10)
 #define MAX_ITEM_LEN                 256
-#define MAX_DEVICES_LOOKDUP          20
 #define BLUETOOTH_MAC_STR_LEN        17  // 'xx:xx:xx:xx:xx:xx'
+#define BLUETOOTH_MAC_STRNULL_LEN    18  // 'xx:xx:xx:xx:xx:xx'
 #define BLUETOOTH_DEVICE_INFO_LENGHT 64
+#define BLUETOOTH_REQUEST_TIMEOUT_MS 1000
 
 #define strlit_len(y) (y), sizeof (y)
-#define UNUSED __attribute__ ((unused))
+#define UNUSED        __attribute__ ((unused))
 
 typedef struct {
   bdaddr_t device_addr;
-  int request_update;
-  int check_trusted;
-  int min_strength;
+  int8_t min_strength;
+  uint8_t request_update;
+  uint8_t check_trusted;
 } bt_config_t;
 
 #define AUTO_CLOSE __attribute__ ((cleanup (close_fd)))
-static void close_fd (int* fd) {
+static void close_fd (const int* fd) {
   if (*fd >= 0) close (*fd);
 }
 
@@ -40,7 +42,7 @@ static void close_fd (int* fd) {
 static void auto_free (char** ptr) {
   if (*ptr) {
     free (*ptr);
-    *ptr = NULL;
+    *ptr = nullptr;
   }
 }
 
@@ -135,8 +137,9 @@ static int read_config (pam_handle_t* pamh, bt_config_t* config) {
     return -1;
   }
 
-  char device_str[18] = {0};  // MAC address string + `\0`
-  int found_device = 0, found_strength = 0;
+  char device_str[BLUETOOTH_MAC_STRNULL_LEN] = {0};  // MAC address string + `\0`
+  int found_device = 0;
+  int found_strength = 0;
 
   AUTO_FREE char* fbuffer = malloc (SYSCALL_MAX_BYTES_READ);
   if (!fbuffer) {
@@ -144,7 +147,7 @@ static int read_config (pam_handle_t* pamh, bt_config_t* config) {
     return -1;
   }
 
-  int read_res = read (file, fbuffer, SYSCALL_MAX_BYTES_READ);
+  int read_res = (int)read (file, fbuffer, SYSCALL_MAX_BYTES_READ);
 
   if (read_res == -1) {
     pam_syslog (pamh, LOG_ERR, "Could not read config file: %s", CONFIG_FILE);
@@ -163,14 +166,16 @@ static int read_config (pam_handle_t* pamh, bt_config_t* config) {
 
   int pos = 0;
   size_t line = 0;
-  char key[MAX_ITEM_LEN], value[MAX_ITEM_LEN];
-  size_t key_len, value_len;
+  char key[MAX_ITEM_LEN];
+  char value[MAX_ITEM_LEN];
+  size_t key_len;
+  size_t value_len;
 
   int parse_result;
   while ((parse_result = parse_next_kv (
               fbuffer, read_res, &pos, &line, key, &key_len, value, &value_len, pamh
           )) > 0) {
-    if (strncmp (key, "device", 6) == 0) {
+    if (strncmp (key, strlit_len ("device")) == 0) {
       strncpy (device_str, value, sizeof (device_str) - 1);
 
       if (str2ba (device_str, &config->device_addr) != 0) {
@@ -178,12 +183,12 @@ static int read_config (pam_handle_t* pamh, bt_config_t* config) {
       } else {
         found_device = 1;
       }
-    } else if (strncmp (key, "request_update", 14) == 0) {
-      config->request_update = abs (atoi (value));
-    } else if (strncmp (key, "check_trusted", 13) == 0) {
-      config->check_trusted = abs (atoi (value));
-    } else if (strncmp (key, "min_strength", 12) == 0) {
-      int8_t strength = -abs (atoi (value));  // ensure negative
+    } else if (strncmp (key, strlit_len ("request_update")) == 0) {
+      config->request_update = (uint8_t)abs (atoi (value));  // NOLINT (cert-err33-c)
+    } else if (strncmp (key, strlit_len ("check_trusted")) == 0) {
+      config->check_trusted = (uint8_t)abs (atoi (value));   // NOLINT (cert-err33-c)
+    } else if (strncmp (key, strlit_len ("min_strength")) == 0) {
+      int8_t strength = (int8_t)-abs (atoi (value));  // NOLINT (cert-err33-c) ensure negative
 
       // either user wrote 0, or NaN
       if (strength == 0) {
@@ -227,7 +232,7 @@ static int is_device_trusted (
   }
 
   char infof_path[BLUETOOTH_DEVICE_INFO_LENGHT] = "/var/lib/bluetooth/";
-  uint8_t index = (uint8_t)strlen (infof_path);
+  uint64_t index = strlen (infof_path);
 
   strcpy (infof_path + index, device_mac);
   index += BLUETOOTH_MAC_STR_LEN;
@@ -250,7 +255,7 @@ static int is_device_trusted (
     return -1;
   }
 
-  int read_res = read (file, fbuffer, SYSCALL_MAX_BYTES_READ);
+  int read_res = (int)read (file, fbuffer, SYSCALL_MAX_BYTES_READ);
   if (read_res <= 0) {
     pam_syslog (pamh, LOG_DEBUG, "Could not read bluetooth info file: %s", infof_path);
     return 0;
@@ -258,19 +263,17 @@ static int is_device_trusted (
 
   int pos = 0;
   size_t line = 0;
-  char key[MAX_ITEM_LEN], value[MAX_ITEM_LEN];
-  size_t key_len, value_len;
+  char key[MAX_ITEM_LEN];
+  char value[MAX_ITEM_LEN];
+  size_t key_len;
+  size_t value_len;
 
   int parse_result;
   while ((parse_result = parse_next_kv (
               fbuffer, read_res, &pos, &line, key, &key_len, value, &value_len, pamh
           )) > 0) {
-    if (strncmp (key, "Trusted", 7) == 0) {
-      if (strncmp (value, "true", 4) == 0) {
-        return 1;
-      } else {
-        return 0;
-      }
+    if (strncmp (key, strlit_len ("Trusted")) == 0) {
+      return (strncmp (value, strlit_len ("true")) == 0);
     }
   }
 
@@ -282,7 +285,7 @@ static int is_device_trusted (
   return 0;
 }
 
-int8_t dev_get_rssi (pam_handle_t* pamh, int dev_id, uint16_t handle) {
+static int8_t dev_get_rssi (pam_handle_t* pamh, int dev_id, uint16_t handle) {
   AUTO_CLOSE int sock = hci_open_dev (dev_id);
   if (sock < 0) {
     pam_syslog (pamh, LOG_ERR, "Device (handle: %d) hci_open_dev failed", handle);
@@ -290,7 +293,7 @@ int8_t dev_get_rssi (pam_handle_t* pamh, int dev_id, uint16_t handle) {
   }
 
   int8_t rssi;
-  int err = hci_read_rssi (sock, handle, &rssi, 1000);
+  int err = hci_read_rssi (sock, handle, &rssi, BLUETOOTH_REQUEST_TIMEOUT_MS);
   if (err < 0) {
     pam_syslog (pamh, LOG_ERR, "Device (handle: %d) hci_read_rssi failed", handle);
     return -1;
@@ -299,7 +302,7 @@ int8_t dev_get_rssi (pam_handle_t* pamh, int dev_id, uint16_t handle) {
   return rssi;
 }
 
-int8_t get_fresh_rssi (pam_handle_t* pamh, int hci_sock, uint16_t handle) {
+static int8_t get_fresh_rssi (pam_handle_t* pamh, int hci_sock, uint16_t handle) {
   struct hci_request rq;
   read_rssi_rp rp;
   uint16_t cmd_handle = htobs (handle);
@@ -312,7 +315,7 @@ int8_t get_fresh_rssi (pam_handle_t* pamh, int hci_sock, uint16_t handle) {
   rq.rparam = &rp;
   rq.rlen = READ_RSSI_RP_SIZE;
 
-  if (hci_send_req (hci_sock, &rq, 1000) < 0) {
+  if (hci_send_req (hci_sock, &rq, BLUETOOTH_REQUEST_TIMEOUT_MS) < 0) {
     pam_syslog (pamh, LOG_ERR, "Device (handle: %d) hci_send_req failed", handle);
     return 0;
   }
@@ -328,19 +331,21 @@ int8_t get_fresh_rssi (pam_handle_t* pamh, int hci_sock, uint16_t handle) {
 static bool check_paired_device_proximity (
     pam_handle_t* pamh, int hci_sock, bdaddr_t* target_addr, int8_t min_strength
 ) {
-  char name[248];
+  char name[HCI_MAX_NAME_LENGTH];
   int8_t rssi;
 
   // this establishes temporary connection
   if (hci_read_remote_name_with_clock_offset (
-          hci_sock, target_addr, 0x02, 0, sizeof (name), name, 500
+          hci_sock, target_addr, 0x02, 0, HCI_MAX_NAME_LENGTH, name,
+          500  // NOLINT (readability-magic-numbers) timeout 500 ms
       ) < 0) {
     pam_syslog (pamh, LOG_DEBUG, "Device not reachable or powered off");
     return false;
   }
 
+  // NOLINTNEXTLINE (readability-magic-numbers) timeout 100 ms
   if (hci_read_rssi (hci_sock, 0, &rssi, 100) == 0) {
-    char addr_str[18];
+    char addr_str[BLUETOOTH_MAC_STRNULL_LEN];
     ba2str (target_addr, addr_str);
     pam_syslog (pamh, LOG_DEBUG, "Paired device %s nearby with RSSI: %d dBm", addr_str, rssi);
 
@@ -358,7 +363,7 @@ static bool check_paired_device (
   pam_syslog (pamh, LOG_DEBUG, "Checking for nearby paired Bluetooth device...");
 
   if (config->check_trusted) {
-    char addr_str[18];
+    char addr_str[BLUETOOTH_MAC_STRNULL_LEN];
     ba2str (&config->device_addr, addr_str);
 
     int trust_result = is_device_trusted (pamh, bt_adapter_addrs, addr_str);
@@ -390,14 +395,14 @@ static int check_connected_device (
   struct hci_conn_list_req* conn_list;
   struct hci_conn_info* conn_info;
 
-  conn_list = malloc (sizeof (*conn_list) + MAX_DEVICES_LOOKDUP * sizeof (*conn_info));
+  conn_list = malloc (sizeof (*conn_list) + (HCI_MAX_DEV * sizeof (*conn_info)));
   if (!conn_list) {
     pam_syslog (pamh, LOG_ERR, "Memory allocation failed");
     return -1;
   }
 
-  conn_list->dev_id = dev_id;
-  conn_list->conn_num = MAX_DEVICES_LOOKDUP;
+  conn_list->dev_id = (uint16_t)dev_id;
+  conn_list->conn_num = HCI_MAX_DEV;
   conn_info = conn_list->conn_info;
 
   int get_con_res = ioctl (hci_sock, HCIGETCONNLIST, conn_list);
@@ -414,14 +419,14 @@ static int check_connected_device (
     return 0;
   }
 
-  char addr_str[18];
+  char addr_str[BLUETOOTH_MAC_STRNULL_LEN];
   for (int i = 0; i < conn_list->conn_num; i++) {
     ba2str (&conn_info[i].bdaddr, addr_str);
 
     if (bacmp (&conn_info[i].bdaddr, &config->device_addr) == 0) {
-      int8_t rssi = (config->request_update)
-                      ? get_fresh_rssi (pamh, hci_sock, conn_info[i].handle)
-                      : dev_get_rssi (pamh, conn_list->dev_id, conn_info[i].handle);
+      int rssi = (config->request_update)
+                   ? get_fresh_rssi (pamh, hci_sock, conn_info[i].handle)
+                   : dev_get_rssi (pamh, conn_list->dev_id, conn_info[i].handle);
 
       // Fallback to cache values
       rssi = rssi != 0 ? rssi : dev_get_rssi (pamh, dev_id, conn_info[i].handle);
@@ -434,13 +439,13 @@ static int check_connected_device (
       if (rssi == 0) {
         pam_syslog (pamh, LOG_WARNING, "Device signal strength is not valid, ignored");
         return 0;
-      } else if (rssi >= config->min_strength) {
+      }
+      if (rssi >= config->min_strength) {
         pam_syslog (pamh, LOG_INFO, "Device signal strength sufficient for authentication");
         return 1;
-      } else {
-        pam_syslog (pamh, LOG_WARNING, "Device found but signal too weak");
-        return -1;
       }
+      pam_syslog (pamh, LOG_WARNING, "Device found but signal too weak");
+      return -1;
     }
   }
 
@@ -451,7 +456,7 @@ static int check_connected_device (
 
 static bool check_bluetooth_device (pam_handle_t* pamh, bt_config_t* config) {
   // default HCI device
-  int dev_id = hci_get_route (NULL);
+  int dev_id = hci_get_route (nullptr);
   if (dev_id < 0) {
     pam_syslog (pamh, LOG_ERR, "No Bluetooth adapter found");
     return false;
@@ -470,7 +475,7 @@ static bool check_bluetooth_device (pam_handle_t* pamh, bt_config_t* config) {
     return false;
   }
 
-  char bt_adapter_addrs[18];
+  char bt_adapter_addrs[BLUETOOTH_MAC_STRNULL_LEN];
   int did = ba2str (&local_addr, bt_adapter_addrs);
   // int did = ba2str (&bt_adapter.bdaddr, bt_adapter_addrs);
 
@@ -509,8 +514,8 @@ PAM_EXTERN int pam_sm_authenticate (
     return PAM_AUTH_ERR;
   }
 
-  const char* password = NULL;
-  int retval = pam_get_authtok (pamh, PAM_AUTHTOK, &password, NULL);
+  const char* password = nullptr;
+  int retval = pam_get_authtok (pamh, PAM_AUTHTOK, &password, nullptr);
   if (retval != PAM_SUCCESS) {
     pam_syslog (pamh, LOG_ERR, "Failed to get password");
     return retval;
@@ -528,10 +533,10 @@ PAM_EXTERN int pam_sm_authenticate (
   if (check_bluetooth_device (pamh, &config)) {
     pam_syslog (pamh, LOG_DEBUG, "Bluetooth authentication successful");
     return PAM_SUCCESS;
-  } else {
-    pam_syslog (pamh, LOG_DEBUG, "Bluetooth authentication failed");
-    return PAM_AUTH_ERR;
   }
+
+  pam_syslog (pamh, LOG_DEBUG, "Bluetooth authentication failed");
+  return PAM_AUTH_ERR;
 }
 
 PAM_EXTERN int pam_sm_setcred (
